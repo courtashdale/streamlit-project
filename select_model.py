@@ -15,11 +15,7 @@ client = OpenAI(api_key=api_key)
 st.title("ChatGPT Chatbot 🤖")
 st.caption("Ask anything! Powered by OpenAI (v1 SDK).")
 
-# Initialize session state for chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = [{"role": "assistant", "content": "Hi there! What would you like to know?"}]
-
-# Sidebar: Model selector
+# Sidebar: Model selector + clear chat button
 models_available = ["gpt-3.5-turbo", "gpt-4", "gpt-4-1106-preview"]
 default_model = st.session_state.get("MAXCHAT_model_chosen", "gpt-3.5-turbo")
 
@@ -27,6 +23,15 @@ with st.sidebar:
     st.markdown("### ⚙️ Settings")
     chosen_model = st.selectbox("Choose your model", models_available, index=models_available.index(default_model))
     st.session_state["MAXCHAT_model_chosen"] = chosen_model
+
+    # Clear chat button
+    if st.button("🗑️ Clear Chat"):
+        st.session_state.messages = [{"role": "assistant", "content": "Hi there! What would you like to know?"}]
+        st.rerun()  # Force app to refresh immediately with clean state
+
+# Initialize chat history if not already set
+if "messages" not in st.session_state:
+    st.session_state.messages = [{"role": "assistant", "content": "Hi there! What would you like to know?"}]
 
 # Display previous messages
 for msg in st.session_state.messages:
