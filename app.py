@@ -16,7 +16,7 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 
-st.title("ChatGPT Chatbot 🤖")
+st.title("Chatbot 🤖")
 st.caption("Ask anything! Powered by OpenAI (v1 SDK).")
 
 # Available models
@@ -132,10 +132,10 @@ def display_file_attachment(filename, file_type, content_length, file_key):
 
 # ---- SIDEBAR ----
 with st.sidebar:
-    st.markdown("### ⚙️ Settings")
+    st.markdown("# Settings")
 
     chosen_model = st.selectbox(
-        "Choose your model",
+        "Select your model",
         models_available,
         index=models_available.index(st.session_state["MAXCHAT_model_chosen"])
     )
