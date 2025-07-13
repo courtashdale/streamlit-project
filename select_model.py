@@ -19,20 +19,19 @@ st.caption("Ask anything! Powered by OpenAI (v1 SDK).")
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Hi there! What would you like to know?"}]
 
+# Sidebar: Model selector
+models_available = ["gpt-3.5-turbo", "gpt-4", "gpt-4-1106-preview"]
+default_model = st.session_state.get("MAXCHAT_model_chosen", "gpt-3.5-turbo")
+
+with st.sidebar:
+    st.markdown("### ⚙️ Settings")
+    chosen_model = st.selectbox("Choose your model", models_available, index=models_available.index(default_model))
+    st.session_state["MAXCHAT_model_chosen"] = chosen_model
+
 # Display previous messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
-
-models_available = ["gpt-3.5-turbo", "gpt-4", "gpt-4-1106-preview"]
-index_of_model = models_available.index(st.session_state.get('MAXCHAT_model_chosen', models_available[0]))
-
-chosen_model = st.selectbox(
-    "Choose your model",
-    models_available,
-    index=index_of_model
-)
-st.session_state.MAXCHAT_model_chosen = chosen_model
 
 # Handle new input
 if prompt := st.chat_input("Ask something..."):
@@ -48,7 +47,7 @@ if prompt := st.chat_input("Ask something..."):
 
         try:
             stream = client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model=st.session_state["MAXCHAT_model_chosen"],
                 messages=st.session_state.messages,
                 stream=True,
             )
