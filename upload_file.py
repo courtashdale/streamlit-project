@@ -4,6 +4,8 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from docx import Document
 import io
+import PyPDF2
+import mammoth
 
 # Load your OpenAI API key
 load_dotenv()
@@ -30,6 +32,36 @@ if "previous_model" not in st.session_state:
 if "messages" not in st.session_state:
     st.session_state["messages"] = [{"role": "assistant", "content": "Hi there! What would you like to know?"}]
 
+# ---- HELPER FUNCTIONS ----
+def extract_text_from_pdf(file_bytes):
+    """Extract text from PDF file bytes"""
+    try:
+        pdf_reader = PyPDF2.PdfReader(io.BytesIO(file_bytes))
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        return text.strip()
+    except Exception as e:
+        raise Exception(f"Error reading PDF: {str(e)}")
+
+def extract_text_from_docx(file_bytes):
+    """Extract text from DOCX file bytes"""
+    try:
+        doc = Document(io.BytesIO(file_bytes))
+        text = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
+        return text.strip()
+    except Exception as e:
+        raise Exception(f"Error reading DOCX: {str(e)}")
+
+def extract_text_from_docx_mammoth(file_bytes):
+    """Alternative DOCX extraction using mammoth (better formatting)"""
+    try:
+        with io.BytesIO(file_bytes) as docx_file:
+            result = mammoth.extract_raw_text(docx_file)
+            return result.value.strip()
+    except Exception as e:
+        raise Exception(f"Error reading DOCX with mammoth: {str(e)}")
+
 # ---- SIDEBAR ----
 with st.sidebar:
     st.markdown("### ⚙️ Settings")
@@ -51,31 +83,62 @@ with st.sidebar:
 
     if st.button("🗑️ Clear Chat"):
         st.session_state["messages"] = [{"role": "assistant", "content": "Hi there! What would you like to know?"}]
-        st.experimental_rerun()
+        st.rerun()
 
-    uploaded_file = st.file_uploader("Upload a file", type=["txt", "pdf", "docx"], label_visibility="collapsed")
+    # File upload section
+    st.markdown("### 📎 File Upload")
+    uploaded_file = st.file_uploader(
+        "Upload a file", 
+        type=["txt", "pdf", "docx"], 
+        help="Supported formats: TXT, PDF, DOCX"
+    )
+    
     if uploaded_file:
         try:
+            file_content = ""
+            
             if uploaded_file.type == "text/plain":
-                content = uploaded_file.getvalue().decode("utf-8")
+                file_content = uploaded_file.getvalue().decode("utf-8")
+                
             elif uploaded_file.type == "application/pdf":
-                st.warning("PDF processing requires additional libraries. Displaying raw content.")
-                content = str(uploaded_file.getvalue())
+                file_content = extract_text_from_pdf(uploaded_file.getvalue())
+                
             elif uploaded_file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-                doc = Document(io.BytesIO(uploaded_file.getvalue()))
-                content = "\n".join([paragraph.text for paragraph in doc.paragraphs if paragraph.text.strip()])
+                # Try primary method first, fallback to mammoth if needed
+                try:
+                    file_content = extract_text_from_docx(uploaded_file.getvalue())
+                except:
+                    file_content = extract_text_from_docx_mammoth(uploaded_file.getvalue())
             else:
-                content = uploaded_file.getvalue().decode("utf-8")
+                # Fallback for other text files
+                file_content = uploaded_file.getvalue().decode("utf-8")
             
-            st.success(f"File '{uploaded_file.name}' uploaded successfully!")
+            # Display file info
+            st.success(f"✅ File '{uploaded_file.name}' processed successfully!")
+            st.info(f"📄 Content length: {len(file_content)} characters")
             
-            if st.button("📎 Add file content to chat"):
-                file_message = f"**File content from {uploaded_file.name}:**\n\n{content[:2000]}{'...' if len(content) > 2000 else ''}"
+            # Preview content
+            with st.expander("📖 Preview file content"):
+                st.text_area(
+                    "File content preview:",
+                    value=file_content[:1000] + ("..." if len(file_content) > 1000 else ""),
+                    height=150,
+                    disabled=True
+                )
+            
+            # Add to chat button
+            if st.button("📎 Add file content to chat", key="add_file"):
+                # Truncate content if too long (keep reasonable length for API)
+                max_length = 8000
+                content_to_add = file_content[:max_length] + ("...\n\n[Content truncated due to length]" if len(file_content) > max_length else "")
+                
+                file_message = f"**File content from {uploaded_file.name}:**\n\n{content_to_add}"
                 st.session_state["messages"].append({"role": "user", "content": file_message})
-                st.experimental_rerun()
+                st.rerun()
                 
         except Exception as e:
-            st.error(f"Error processing file: {e}")
+            st.error(f"❌ Error processing file: {e}")
+            st.info("💡 Make sure you have the required libraries installed:\n- PyPDF2 for PDF files\n- python-docx for DOCX files\n- mammoth for advanced DOCX processing")
 
 # ---- DISPLAY MESSAGES ----
 for msg in st.session_state["messages"]:
