@@ -15,28 +15,48 @@ client = OpenAI(api_key=api_key)
 st.title("ChatGPT Chatbot 🤖")
 st.caption("Ask anything! Powered by OpenAI (v1 SDK).")
 
-# Sidebar: Model selector + clear chat button
+# Available models
 models_available = ["gpt-3.5-turbo", "gpt-4", "gpt-4-1106-preview"]
-default_model = st.session_state.get("MAXCHAT_model_chosen", "gpt-3.5-turbo")
 
-with st.sidebar:
-    st.markdown("### ⚙️ Settings")
-    chosen_model = st.selectbox("Choose your model", models_available, index=models_available.index(default_model))
-    st.session_state["MAXCHAT_model_chosen"] = chosen_model
+# Ensure state for model selection and messages
+if "MAXCHAT_model_chosen" not in st.session_state:
+    st.session_state["MAXCHAT_model_chosen"] = "gpt-3.5-turbo"
 
-    # Clear chat button
-    if st.button("🗑️ Clear Chat"):
-        st.session_state.messages = [{"role": "assistant", "content": "Hi there! What would you like to know?"}]
-        st.rerun()  # Force app to refresh immediately with clean state
+if "previous_model" not in st.session_state:
+    st.session_state["previous_model"] = st.session_state["MAXCHAT_model_chosen"]
 
-# Initialize chat history if not already set
 if "messages" not in st.session_state:
     st.session_state.messages = [{"role": "assistant", "content": "Hi there! What would you like to know?"}]
 
+# Sidebar: Model selector and clear chat
+with st.sidebar:
+    st.markdown("### ⚙️ Settings")
+    chosen_model = st.selectbox(
+        "Choose your model",
+        models_available,
+        index=models_available.index(st.session_state["MAXCHAT_model_chosen"])
+    )
+
+    # Detect model change and insert confirmation caption
+    if chosen_model != st.session_state["MAXCHAT_model_chosen"]:
+        st.session_state["previous_model"] = st.session_state["MAXCHAT_model_chosen"]
+        st.session_state["MAXCHAT_model_chosen"] = chosen_model
+        st.session_state.messages.append({
+            "role": "system",
+            "content": f"Switched model to **{chosen_model}**"
+        })
+
+    if st.button("🗑️ Clear Chat"):
+        st.session_state.messages = [{"role": "assistant", "content": "Hi there! What would you like to know?"}]
+        st.rerun()
+
 # Display previous messages
 for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+    if msg["role"] == "system":
+        st.caption(msg["content"])
+    else:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
 # Handle new input
 if prompt := st.chat_input("Ask something..."):
@@ -53,7 +73,7 @@ if prompt := st.chat_input("Ask something..."):
         try:
             stream = client.chat.completions.create(
                 model=st.session_state["MAXCHAT_model_chosen"],
-                messages=st.session_state.messages,
+                messages=[m for m in st.session_state.messages if m["role"] in ["user", "assistant"]],
                 stream=True,
             )
             for chunk in stream:
