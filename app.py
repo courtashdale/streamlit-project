@@ -6,6 +6,15 @@ from docx import Document
 import io
 import PyPDF2
 import mammoth
+from utils.rag_utils import (
+    chunk_text, 
+    get_embeddings_openai, 
+    create_tfidf_embeddings,
+    find_relevant_chunks,
+    create_context_from_chunks,
+    update_document_index
+)
+import numpy as np
 
 # Load your OpenAI API key
 load_dotenv()
@@ -16,8 +25,8 @@ if not api_key:
 
 client = OpenAI(api_key=api_key)
 
-st.title("Chatbot 🤖")
-st.caption("Ask anything! Powered by OpenAI (v1 SDK).")
+st.title("Doc Chatbot 🤖")
+st.caption("Ask anything or upload docs to discuss them.")
 
 # Available models
 models_available = ["gpt-3.5-turbo", "gpt-4", "gpt-4-1106-preview"]
@@ -34,6 +43,21 @@ if "messages" not in st.session_state:
 
 if "uploaded_files" not in st.session_state:
     st.session_state["uploaded_files"] = {}
+
+if "document_chunks" not in st.session_state:
+    st.session_state["document_chunks"] = []
+
+if "document_metadata" not in st.session_state:
+    st.session_state["document_metadata"] = []
+
+if "document_embeddings" not in st.session_state:
+    st.session_state["document_embeddings"] = None
+
+if "use_rag" not in st.session_state:
+    st.session_state["use_rag"] = True
+
+if "embedding_method" not in st.session_state:
+    st.session_state["embedding_method"] = "Auto"
 
 # ---- HELPER FUNCTIONS ----
 def extract_text_from_pdf(file_bytes):
@@ -99,6 +123,89 @@ def process_uploaded_file(uploaded_file):
     except Exception as e:
         raise Exception(f"Error processing file: {str(e)}")
 
+def add_document_to_rag_index(file_content, file_metadata):
+    """Add document to RAG index with chunking and embeddings"""
+    try:
+        # Update document index
+        content_size = len(file_content)
+        if content_size > 1000000:  # 1MB
+            st.warning(f"Large file detected ({content_size:,} characters). Processing may take time...")
+        
+        with st.spinner("Creating document chunks..."):
+            try:
+                updated_chunks, updated_metadata = update_document_index(
+                    file_content=file_content,
+                    file_metadata=file_metadata,
+                    existing_chunks=st.session_state["document_chunks"],
+                    existing_metadata=st.session_state["document_metadata"]
+                )
+            except Exception as chunk_error:
+                st.error(f"Chunking failed: {str(chunk_error)}")
+                return False
+        
+        # Update session state
+        st.session_state["document_chunks"] = updated_chunks
+        st.session_state["document_metadata"] = updated_metadata
+        
+        # Generate embeddings for all chunks
+        if updated_chunks:
+            chunks_count = len(updated_chunks)
+            st.info(f"Processing {chunks_count} document chunks...")
+            
+            # Get embedding method preference
+            embedding_method = st.session_state.get("embedding_method", "Auto")
+            
+            # Decide which embedding method to use
+            use_tfidf = (
+                embedding_method == "TF-IDF" or 
+                (embedding_method == "Auto" and chunks_count > 100)
+            )
+            
+            if use_tfidf or embedding_method == "TF-IDF":
+                if chunks_count > 100:
+                    st.info("Large document detected - using TF-IDF embeddings for faster processing...")
+                try:
+                    with st.spinner("Generating TF-IDF embeddings..."):
+                        embeddings, vectorizer = create_tfidf_embeddings(updated_chunks)
+                        st.session_state["document_embeddings"] = embeddings
+                        st.session_state["tfidf_vectorizer"] = vectorizer
+                        st.success("✅ TF-IDF embeddings created successfully!")
+                except Exception as tfidf_error:
+                    st.error(f"TF-IDF embeddings failed: {str(tfidf_error)}")
+                    return False
+            else:
+                # Try OpenAI embeddings
+                try:
+                    with st.spinner("Generating OpenAI embeddings..."):
+                        embeddings = get_embeddings_openai(updated_chunks, client)
+                        st.session_state["document_embeddings"] = embeddings
+                        if "tfidf_vectorizer" in st.session_state:
+                            del st.session_state["tfidf_vectorizer"]
+                        st.success("✅ OpenAI embeddings created successfully!")
+                except Exception as e:
+                    st.warning(f"OpenAI embeddings failed: {str(e)}")
+                    
+                    # Fallback to TF-IDF only if method is Auto
+                    if embedding_method == "Auto":
+                        st.info("Falling back to TF-IDF embeddings...")
+                        try:
+                            with st.spinner("Generating TF-IDF embeddings..."):
+                                embeddings, vectorizer = create_tfidf_embeddings(updated_chunks)
+                                st.session_state["document_embeddings"] = embeddings
+                                st.session_state["tfidf_vectorizer"] = vectorizer
+                                st.success("✅ TF-IDF embeddings created successfully!")
+                        except Exception as tfidf_error:
+                            st.error(f"TF-IDF embeddings also failed: {str(tfidf_error)}")
+                            return False
+                    else:
+                        st.error("OpenAI embeddings failed and no fallback available with manual selection.")
+                        return False
+        
+        return True
+    except Exception as e:
+        st.error(f"Error adding document to RAG index: {str(e)}")
+        return False
+
 def display_file_attachment(filename, file_type, content_length, file_key):
     """Display file as an attachment card"""
     icon = get_file_icon(file_type)
@@ -139,6 +246,22 @@ with st.sidebar:
         models_available,
         index=models_available.index(st.session_state["MAXCHAT_model_chosen"])
     )
+    
+    # RAG toggle
+    st.session_state["use_rag"] = st.checkbox(
+        "Use RAG (Retrieval-Augmented Generation)",
+        value=st.session_state["use_rag"],
+        help="When enabled, uses intelligent document chunking and retrieval instead of simple truncation"
+    )
+    
+    # Embedding method selection
+    if st.session_state["use_rag"]:
+        embedding_method = st.selectbox(
+            "Embedding Method",
+            ["Auto", "OpenAI", "TF-IDF"],
+            help="Auto: OpenAI for <100 chunks, TF-IDF for larger documents"
+        )
+        st.session_state["embedding_method"] = embedding_method
 
     # Detect model change
     if chosen_model != st.session_state["MAXCHAT_model_chosen"]:
@@ -152,6 +275,11 @@ with st.sidebar:
     if st.button("🗑️ Clear Chat"):
         st.session_state["messages"] = [{"role": "assistant", "content": "Hi there! What would you like to know?"}]
         st.session_state["uploaded_files"] = {}
+        st.session_state["document_chunks"] = []
+        st.session_state["document_metadata"] = []
+        st.session_state["document_embeddings"] = None
+        if "tfidf_vectorizer" in st.session_state:
+            del st.session_state["tfidf_vectorizer"]
         st.rerun()
 
     # File upload section
@@ -180,6 +308,25 @@ with st.sidebar:
                         "size": len(file_content)
                     }
                     
+                    # Add to RAG index if enabled
+                    if st.session_state["use_rag"]:
+                        file_metadata = {
+                            "filename": uploaded_file.name,
+                            "file_type": uploaded_file.type,
+                            "file_key": file_key
+                        }
+                        
+                        # Add timeout handling for RAG processing
+                        try:
+                            rag_success = add_document_to_rag_index(file_content, file_metadata)
+                            if not rag_success:
+                                st.error("Failed to add document to RAG index. File uploaded but RAG disabled for this session.")
+                                st.session_state["use_rag"] = False
+                        except Exception as rag_error:
+                            st.error(f"RAG processing failed: {str(rag_error)}")
+                            st.info("File uploaded successfully but RAG processing disabled for this session.")
+                            st.session_state["use_rag"] = False
+                    
                     # Automatically add to chat
                     file_message = {
                         "role": "user", 
@@ -204,6 +351,18 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"❌ Error processing file: {e}")
     
+    # Show RAG status
+    if st.session_state["use_rag"]:
+        st.markdown("### 🔍 RAG Status")
+        chunks_count = len(st.session_state["document_chunks"])
+        
+        if chunks_count > 0:
+            st.success(f"✅ {chunks_count} document chunks indexed")
+            embedding_type = "OpenAI" if "tfidf_vectorizer" not in st.session_state else "TF-IDF"
+            st.caption(f"Using {embedding_type} embeddings")
+        else:
+            st.info("Upload documents to enable RAG")
+    
     # Show uploaded files
     if st.session_state["uploaded_files"]:
         st.markdown("### 📁 Uploaded Files")
@@ -212,6 +371,35 @@ with st.sidebar:
                 st.caption(f"Size: {file_info['size']:,} characters")
                 if st.button("🗑️ Remove", key=f"remove_{file_key}"):
                     del st.session_state["uploaded_files"][file_key]
+                    
+                    # Remove from RAG index - rebuild embeddings
+                    if st.session_state["use_rag"]:
+                        # Filter out chunks from this file
+                        remaining_chunks = []
+                        remaining_metadata = []
+                        
+                        for chunk, metadata in zip(st.session_state["document_chunks"], st.session_state["document_metadata"]):
+                            if metadata.get("file_key") != file_key:
+                                remaining_chunks.append(chunk)
+                                remaining_metadata.append(metadata)
+                        
+                        st.session_state["document_chunks"] = remaining_chunks
+                        st.session_state["document_metadata"] = remaining_metadata
+                        
+                        # Rebuild embeddings
+                        if remaining_chunks:
+                            try:
+                                embeddings = get_embeddings_openai(remaining_chunks, client)
+                                st.session_state["document_embeddings"] = embeddings
+                            except:
+                                embeddings, vectorizer = create_tfidf_embeddings(remaining_chunks)
+                                st.session_state["document_embeddings"] = embeddings
+                                st.session_state["tfidf_vectorizer"] = vectorizer
+                        else:
+                            st.session_state["document_embeddings"] = None
+                            if "tfidf_vectorizer" in st.session_state:
+                                del st.session_state["tfidf_vectorizer"]
+                    
                     st.rerun()
 
 # ---- DISPLAY MESSAGES ----
@@ -268,17 +456,75 @@ if prompt := st.chat_input("Ask something..."):
         message_placeholder = st.empty()
 
         try:
-            # Prepare messages for API (include file content in context)
+            # Prepare messages for API
             api_messages = []
+            
+            # Add document context using RAG if enabled and available
+            chunks_available = len(st.session_state["document_chunks"]) > 0
+            embeddings_available = st.session_state["document_embeddings"] is not None
+            
+            if (st.session_state["use_rag"] and chunks_available and embeddings_available):
+                
+                # Debug info
+                st.info(f"🔍 RAG Search: '{prompt}' in {len(st.session_state['document_chunks'])} chunks")
+                
+                # Find relevant chunks for the current query
+                try:
+                    if "tfidf_vectorizer" in st.session_state:
+                        # Using TF-IDF
+                        relevant_chunks = find_relevant_chunks(
+                            query=prompt,
+                            chunks=st.session_state["document_chunks"],
+                            embeddings=st.session_state["document_embeddings"],
+                            top_k=3,
+                            vectorizer=st.session_state["tfidf_vectorizer"]
+                        )
+                    else:
+                        # Using OpenAI embeddings
+                        relevant_chunks = find_relevant_chunks(
+                            query=prompt,
+                            chunks=st.session_state["document_chunks"],
+                            embeddings=st.session_state["document_embeddings"],
+                            top_k=3,
+                            client=client
+                        )
+                    
+                    if relevant_chunks:
+                        # Create context from relevant chunks
+                        context = create_context_from_chunks(relevant_chunks)
+                        
+                        # Add context as system message
+                        api_messages.append({
+                            "role": "system",
+                            "content": f"Relevant document context:\n\n{context}\n\nUse this context to answer the user's question when relevant."
+                        })
+                        
+                        # Show user that RAG is working
+                        st.success(f"🔍 Retrieved {len(relevant_chunks)} relevant document sections")
+                    else:
+                        st.warning("⚠️ No relevant chunks found for this query")
+                        
+                except Exception as e:
+                    st.warning(f"RAG retrieval failed, falling back to simple approach: {str(e)}")
+            else:
+                # Debug why RAG is not being used
+                if not st.session_state["use_rag"]:
+                    st.info("ℹ️ RAG is disabled in settings")
+                elif not chunks_available:
+                    st.info("ℹ️ No document chunks available")
+                elif not embeddings_available:
+                    st.info("ℹ️ No embeddings available")
+            
+            # Add conversation history
             for msg in st.session_state["messages"]:
                 if msg["role"] in ["user", "assistant"]:
                     if msg["role"] == "user" and "file_attachment" in msg:
-                        # Include file content in the message for the API
+                        # For file attachments, just mention the file was uploaded
                         file_info = msg["file_attachment"]
-                        content_to_send = f"File: {file_info['name']}\n\nContent:\n{file_info['content'][:8000]}"
-                        if len(file_info['content']) > 8000:
-                            content_to_send += "\n\n[Content truncated due to length]"
-                        api_messages.append({"role": "user", "content": content_to_send})
+                        api_messages.append({
+                            "role": "user", 
+                            "content": f"[Uploaded file: {file_info['name']}]"
+                        })
                     else:
                         api_messages.append({"role": msg["role"], "content": msg["content"]})
             

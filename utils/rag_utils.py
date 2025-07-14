@@ -13,7 +13,7 @@ from openai import OpenAI
 
 def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
     """
-    Split text into overlapping chunks.
+    Split text into overlapping chunks with safety measures.
     
     Args:
         text: Input text to chunk
@@ -23,14 +23,19 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]
     Returns:
         List[str]: List of text chunks
     """
-    if not text:
+    if not text or len(text.strip()) == 0:
         return []
+    
+    # For very large documents, use simpler chunking
+    if len(text) > 500000:  # 500KB
+        return chunk_text_simple(text, chunk_size, overlap)
     
     chunks = []
     start = 0
     text_length = len(text)
+    max_chunks = min(5000, (text_length // chunk_size) + 100)  # Hard limit
     
-    while start < text_length:
+    while start < text_length and len(chunks) < max_chunks:
         end = min(start + chunk_size, text_length)
         
         # Try to find a sentence boundary
@@ -46,7 +51,52 @@ def chunk_text(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]
         if chunk:
             chunks.append(chunk)
         
+        # Ensure we make progress
+        new_start = end - overlap if end < text_length else text_length
+        if new_start <= start:  # Prevent infinite loop
+            new_start = start + max(1, chunk_size // 2)
+        
+        start = new_start
+        
+        # Progress indicator for large documents
+        if len(chunks) % 100 == 0 and len(chunks) > 0:
+            print(f"Processed {len(chunks)} chunks...")
+    
+    if len(chunks) >= max_chunks:
+        print(f"Warning: Reached maximum chunk limit ({max_chunks}). Document may be truncated.")
+    
+    return chunks
+
+
+def chunk_text_simple(text: str, chunk_size: int = 500, overlap: int = 50) -> List[str]:
+    """
+    Simple chunking for very large documents - no sentence boundary detection.
+    
+    Args:
+        text: Input text to chunk
+        chunk_size: Size of each chunk in characters
+        overlap: Number of overlapping characters between chunks
+        
+    Returns:
+        List[str]: List of text chunks
+    """
+    chunks = []
+    start = 0
+    text_length = len(text)
+    max_chunks = 2000  # Hard limit for very large docs
+    
+    while start < text_length and len(chunks) < max_chunks:
+        end = min(start + chunk_size, text_length)
+        chunk = text[start:end].strip()
+        
+        if chunk:
+            chunks.append(chunk)
+        
         start = end - overlap if end < text_length else text_length
+        
+        # Progress indicator
+        if len(chunks) % 200 == 0 and len(chunks) > 0:
+            print(f"Simple chunking: {len(chunks)} chunks processed...")
     
     return chunks
 
@@ -65,16 +115,30 @@ def get_embeddings_openai(texts: List[str], client: OpenAI, model: str = "text-e
     """
     embeddings = []
     
-    # Process in batches to avoid rate limits
-    batch_size = 100
+    # Process in smaller batches to avoid rate limits and timeouts
+    batch_size = 20  # Reduced from 100
+    total_batches = (len(texts) + batch_size - 1) // batch_size
+    
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        response = client.embeddings.create(
-            input=batch,
-            model=model
-        )
-        batch_embeddings = [item.embedding for item in response.data]
-        embeddings.extend(batch_embeddings)
+        batch_num = i // batch_size + 1
+        
+        try:
+            # Add timeout handling
+            response = client.embeddings.create(
+                input=batch,
+                model=model,
+                timeout=30  # 30 second timeout per batch
+            )
+            batch_embeddings = [item.embedding for item in response.data]
+            embeddings.extend(batch_embeddings)
+            
+            # Progress indicator
+            if total_batches > 1:
+                print(f"Processed batch {batch_num}/{total_batches}")
+                
+        except Exception as e:
+            raise Exception(f"OpenAI embedding failed at batch {batch_num}/{total_batches}: {str(e)}")
     
     return np.array(embeddings)
 
@@ -135,8 +199,8 @@ def find_relevant_chunks(
     # Get top k indices
     top_indices = np.argsort(similarities)[-top_k:][::-1]
     
-    # Return chunks with scores
-    results = [(chunks[i], similarities[i]) for i in top_indices if similarities[i] > 0]
+    # Return chunks with scores (include all results, even with low similarity)
+    results = [(chunks[i], similarities[i]) for i in top_indices]
     
     return results
 
@@ -194,8 +258,20 @@ def update_document_index(
     Returns:
         tuple: (updated_chunks, updated_metadata)
     """
+    # Check if content is too large
+    content_length = len(file_content)
+    if content_length > 1000000:  # 1MB limit
+        print(f"Warning: Large file detected ({content_length:,} characters). Processing may take time.")
+    
     # Create chunks from new file
+    print(f"Creating chunks from {file_metadata.get('filename', 'unknown file')}...")
     new_chunks = chunk_text(file_content, chunk_size, overlap)
+    
+    if not new_chunks:
+        print("Warning: No chunks created from file content.")
+        return existing_chunks, existing_metadata
+    
+    print(f"Successfully created {len(new_chunks)} chunks.")
     
     # Create metadata for each chunk
     new_metadata = [

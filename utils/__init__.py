@@ -24,9 +24,7 @@ from .rag_utils import (
 from .charts import (
     detect_chart_request,
     extract_data_from_text,
-    create_plotly_chart,
-    create_document_analytics_charts,
-    create_sample_charts,
+    create_streamlit_chart,
     auto_detect_chart_type
 )
 
@@ -88,9 +86,7 @@ __all__ = [
     # charts
     'detect_chart_request',
     'extract_data_from_text',
-    'create_plotly_chart',
-    'create_document_analytics_charts',
-    'create_sample_charts',
+    'create_streamlit_chart',
     'auto_detect_chart_type',
     
     # ui_components
